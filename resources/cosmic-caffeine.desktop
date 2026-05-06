@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=cosmic-caffeine
+GenericName=Idle/Sleep Inhibitor
+Comment=Toggle idle and sleep inhibition (Wayland-native tray)
+Exec=@BIN@
+Icon=cosmic-caffeine-symbolic
+Terminal=false
+Categories=Utility;
+Keywords=caffeine;sleep;idle;inhibit;tray;
+StartupNotify=false

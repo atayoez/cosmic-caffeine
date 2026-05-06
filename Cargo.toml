@@ -1,0 +1,45 @@
+[package]
+name = "cosmic-caffeine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Wayland-native StatusNotifierItem sleep/idle inhibitor with libcosmic settings GUI"
+repository = "https://github.com/atayozcan/cosmic-caffeine"
+
+[lib]
+name = "cosmic_caffeine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cosmic-caffeine"
+path = "src/main.rs"
+
+[[bin]]
+name = "cosmic-caffeine-settings"
+path = "src/bin/cosmic-caffeine-settings.rs"
+
+[dependencies]
+ksni = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "process"] }
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+notify-rust = "4"
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic.git"
+rev = "0e0960f3c79138b445ae84f7ac6f91d4db36e8b4"
+default-features = false
+features = [
+    "advanced-shaping",
+    "tokio",
+    "wgpu",
+    "winit",
+]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
