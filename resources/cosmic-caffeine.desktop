@@ -1,12 +1,14 @@
 [Desktop Entry]
+Name=Caffeine
+Comment=Inhibit idle and sleep from a panel button
 Type=Application
-Version=1.0
-Name=cosmic-caffeine
-GenericName=Idle/Sleep Inhibitor
-Comment=Toggle idle and sleep inhibition (Wayland-native tray)
 Exec=@BIN@
-Icon=cosmic-caffeine-symbolic
 Terminal=false
-Categories=Utility;
-Keywords=caffeine;sleep;idle;inhibit;tray;
-StartupNotify=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Caffeine;Sleep;Idle;Inhibit;
+Icon=cosmic-caffeine-symbolic
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicShrinkable=true
+X-HostWaylandDisplay=true
+X-CosmicHoverPopup=Auto

@@ -1,13 +1,20 @@
 # cosmic-caffeine
 
 > Status: **proof of concept**. Tray icon toggles a real logind inhibit
-> lock; settings GUI persists preferences. No keyboard shortcut yet,
-> no app-aware "block while window X is focused" yet.
+> lock; settings GUI persists preferences via `cosmic_config`. No
+> keyboard shortcut yet, no app-aware "block while window X is focused"
+> yet.
 
 A Wayland-native idle/sleep inhibitor with a `StatusNotifierItem` tray
 icon and a libcosmic settings GUI. Built to fill a gap in the COSMIC
 desktop — works under any DE that consumes
 `org.kde.StatusNotifierItem` (KDE, Sway+waybar, Hyprland, COSMIC).
+
+Sibling project to [`tb-tray`](https://github.com/atayozcan/tb-tray)
+and [`cosmic-clip`](https://github.com/atayozcan/cosmic-clip); shares
+the [`cosmic-tray-app`](https://github.com/atayozcan/cosmic-tray-app)
+helper crate for paths, autostart, and the single-binary
+`--settings`-re-exec pattern.
 
 ## What it does
 
@@ -42,6 +49,7 @@ daemon over `zbus`.
 
 ```sh
 git clone https://github.com/atayozcan/cosmic-caffeine
+git clone https://github.com/atayozcan/cosmic-tray-app  # sibling lib (path dep)
 cd cosmic-caffeine
 ./install.sh
 ```
@@ -50,12 +58,23 @@ That installs:
 
 | Path | What |
 | --- | --- |
-| `~/.local/bin/cosmic-caffeine` | tray daemon |
-| `~/.local/bin/cosmic-caffeine-settings` | libcosmic settings GUI |
+| `~/.local/bin/cosmic-caffeine` | the binary (daemon + settings GUI in one) |
 | `~/.local/share/icons/hicolor/scalable/apps/cosmic-caffeine{,-active}-symbolic.svg` | tray icons |
-| `~/.local/share/applications/cosmic-caffeine{,-settings}.desktop` | app-menu launchers |
+| `~/.local/share/applications/cosmic-caffeine.desktop` | app-menu launcher |
 
-`./install.sh --uninstall` removes everything the installer wrote.
+Per-user, no root needed. The launcher's `Exec=` is templated with
+the absolute binary path at install time so it keeps working even
+when your desktop session's PATH doesn't include `~/.local/bin`. The
+script cleans up artifacts from earlier installs (the obsolete
+second `cosmic-caffeine-settings` binary, its launcher, etc.) before
+laying down the new files, and (re)starts the daemon so the new
+version is live immediately.
+
+To uninstall:
+
+```sh
+./uninstall.sh
+```
 
 ### Build deps (Arch)
 
@@ -74,14 +93,20 @@ Or enable the *Start cosmic-caffeine on login* toggle in settings.
 
 ## Config
 
-`~/.config/cosmic-caffeine/config.toml`:
+Stored via `cosmic_config` at
+`~/.config/cosmic/io.github.atayozcan.CosmicCaffeine/v1/`, one
+RON-encoded file per field. Fields:
 
-```toml
-default_minutes  = 0      # 0 = indefinite
-inhibit_idle     = true
-inhibit_sleep    = true
-notify_on_toggle = false
-```
+| Field | Type | Default | What |
+| --- | --- | --- | --- |
+| `default_minutes` | u32 | `0` | Click-default duration; 0 = indefinite |
+| `inhibit_idle` | bool | `true` | Block screen blanking / lock-on-idle |
+| `inhibit_sleep` | bool | `true` | Block automatic suspend |
+| `notify_on_toggle` | bool | `false` | Show a notification on toggle |
+
+Changes from the settings GUI propagate to the running daemon
+without a restart — config is re-read on each tray click via
+`cosmic_config`.
 
 ## License
 

@@ -1,342 +1,292 @@
-// cosmic-caffeine: Wayland-native idle/sleep inhibitor.
+// cosmic-caffeine: Wayland-native COSMIC panel applet for idle/sleep
+// inhibition.
 //
-// - Click the tray icon to toggle inhibition (logind Inhibit() over D-Bus).
-// - Tray menu picks duration (5/30/60 min or indefinite) and exposes
-//   Settings… / Quit.
-// - When the timer expires, inhibition releases and the tray icon flips
-//   back to the inactive cup.
-//
-// The actual inhibit lock is a logind FD held on the InhibitState; dropping
-// it returns the lock to logind.
+// The applet IS the long-running process. Click the panel button →
+// popover with the on/off toggle, duration buttons (5/30/60 min,
+// indefinite), and a Settings… link. The actual logind inhibit FD
+// is held in App state behind an Arc<Mutex<Option<Inhibitor>>> —
+// dropping it releases the lock back to logind.
 
-use ksni::{menu::*, Tray, TrayMethods};
-use notify_rust::Notification;
+use cosmic::app::{Core, Task};
+use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
+use cosmic::iced::{event, keyboard, window, Event, Length, Subscription};
+use cosmic::prelude::*;
+use cosmic::widget;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::oneshot;
-use tokio::time::{sleep, Duration};
+use std::time::Duration;
 
-use cosmic_caffeine::config::{self, Config};
+use cosmic_caffeine::config;
+use cosmic_caffeine::fl;
 use cosmic_caffeine::inhibit::Inhibitor;
-use cosmic_caffeine::paths::{config_path, settings_exec};
+use cosmic_caffeine::localize;
+use cosmic_caffeine::APP_ID;
 
-#[derive(Clone)]
-struct CaffeineTray {
-    state: Arc<Mutex<TrayState>>,
+const ICON_OFF: &str = "cosmic-caffeine-symbolic";
+const ICON_ON: &str = "cosmic-caffeine-active-symbolic";
+
+fn main() -> cosmic::iced::Result {
+    localize::localize();
+    cosmic::applet::run::<App>(())
 }
 
-#[derive(Default)]
-struct TrayState {
-    cfg: Config,
-    inhibitor: Option<Inhibitor>,
-    /// Send () to abort an in-flight auto-off timer (when the user toggles
-    /// off manually before it fires).
-    timer_abort: Option<oneshot::Sender<()>>,
-    /// Wall-clock minute count requested for the current session, for the
-    /// tooltip. 0 = indefinite.
+#[derive(Clone, Debug)]
+pub enum Message {
+    TogglePopup,
+    PopupClosed(window::Id),
+    /// Acquire inhibit for `minutes` (0 = indefinite).
+    Acquire(u32),
+    /// Result of the async acquire — Ok updates state, Err clears it.
+    AcquireResult(Result<u32, String>),
+    /// Drop the inhibit FD now (user clicked "Turn off" or timer fired).
+    Release,
+    /// Auto-off timer for generation `gen` fired; release iff still
+    /// active and the generation matches (i.e., user didn't change
+    /// duration / toggle off in the meantime).
+    TimerExpired(usize),
+    OpenSettings,
+    Noop,
+}
+
+pub struct App {
+    core: Core,
+    popup: Option<window::Id>,
+    /// `Some(inh)` while the lock is held. The FD on the Inhibitor
+    /// holds the logind block; dropping it releases.
+    inhibitor: Arc<Mutex<Option<Inhibitor>>>,
+    /// Wall-clock minutes the user requested for the current
+    /// session. 0 = indefinite. Drives the popover label.
     active_minutes: u32,
+    /// Bumped on every Acquire/Release so a still-pending
+    /// TimerExpired from a stale generation no-ops.
+    timer_generation: Arc<AtomicUsize>,
 }
 
-impl Tray for CaffeineTray {
-    fn id(&self) -> String {
-        "cosmic-caffeine".into()
-    }
-    fn title(&self) -> String {
-        "Caffeine".into()
-    }
-    fn icon_name(&self) -> String {
-        let active = self
-            .state
-            .lock()
-            .map(|s| s.inhibitor.is_some())
-            .unwrap_or(false);
-        if active {
-            "cosmic-caffeine-active-symbolic".into()
-        } else {
-            "cosmic-caffeine-symbolic".into()
-        }
-    }
-    fn icon_theme_path(&self) -> String {
-        String::new()
+impl App {
+    fn is_active(&self) -> bool {
+        self.inhibitor.lock().unwrap().is_some()
     }
 
-    fn tool_tip(&self) -> ksni::ToolTip {
-        let (active, minutes) = self
-            .state
-            .lock()
-            .map(|s| (s.inhibitor.is_some(), s.active_minutes))
-            .unwrap_or((false, 0));
-        let title = if active {
-            if minutes == 0 {
-                "Caffeine: on (indefinite)".into()
-            } else {
-                format!("Caffeine: on ({minutes} min)")
-            }
+    fn close_popup_task(&mut self) -> Task<Message> {
+        if let Some(p) = self.popup.take() {
+            destroy_popup(p)
         } else {
-            "Caffeine: off".into()
-        };
-        ksni::ToolTip {
-            title,
-            description: "Click to toggle idle/sleep inhibition".into(),
-            icon_name: if active {
-                "cosmic-caffeine-active-symbolic".into()
-            } else {
-                "cosmic-caffeine-symbolic".into()
+            Task::none()
+        }
+    }
+}
+
+impl cosmic::Application for App {
+    type Executor = cosmic::executor::Default;
+    type Flags = ();
+    type Message = Message;
+    const APP_ID: &'static str = APP_ID;
+
+    fn core(&self) -> &Core {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
+    }
+
+    fn init(core: Core, _: ()) -> (Self, Task<Message>) {
+        (
+            App {
+                core,
+                popup: None,
+                inhibitor: Arc::new(Mutex::new(None)),
+                active_minutes: 0,
+                timer_generation: Arc::new(AtomicUsize::new(0)),
             },
-            icon_pixmap: vec![],
+            Task::none(),
+        )
+    }
+
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::TogglePopup => {
+                if let Some(p) = self.popup.take() {
+                    return destroy_popup(p);
+                }
+                let new_id = window::Id::unique();
+                self.popup = Some(new_id);
+                let popup_settings = self.core.applet.get_popup_settings(
+                    self.core.main_window_id().expect("applet has main window"),
+                    new_id,
+                    None,
+                    None,
+                    None,
+                );
+                get_popup(popup_settings)
+            }
+            Message::PopupClosed(id) => {
+                if Some(id) == self.popup {
+                    self.popup = None;
+                }
+                Task::none()
+            }
+            Message::Acquire(minutes) => {
+                let inhibitor_slot = self.inhibitor.clone();
+                let cfg = config::load();
+                let why = if minutes == 0 {
+                    "User enabled cosmic-caffeine indefinitely".to_string()
+                } else {
+                    format!("User enabled cosmic-caffeine for {minutes} minutes")
+                };
+                Task::perform(
+                    async move {
+                        match Inhibitor::acquire(cfg.inhibit_idle, cfg.inhibit_sleep, &why).await {
+                            Ok(inh) => {
+                                *inhibitor_slot.lock().unwrap() = Some(inh);
+                                Ok(minutes)
+                            }
+                            Err(e) => Err(e),
+                        }
+                    },
+                    |result| cosmic::Action::App(Message::AcquireResult(result)),
+                )
+            }
+            Message::AcquireResult(Ok(minutes)) => {
+                self.active_minutes = minutes;
+                let gen = self.timer_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                if minutes > 0 {
+                    let timer_gen = self.timer_generation.clone();
+                    return Task::perform(
+                        async move {
+                            tokio::time::sleep(Duration::from_secs(u64::from(minutes) * 60)).await;
+                            // Only fire if the generation hasn't moved.
+                            if timer_gen.load(Ordering::SeqCst) == gen {
+                                Some(gen)
+                            } else {
+                                None
+                            }
+                        },
+                        |result| match result {
+                            Some(gen) => cosmic::Action::App(Message::TimerExpired(gen)),
+                            None => cosmic::Action::App(Message::Noop),
+                        },
+                    );
+                }
+                Task::none()
+            }
+            Message::AcquireResult(Err(e)) => {
+                eprintln!("cosmic-caffeine: acquire failed: {e}");
+                self.active_minutes = 0;
+                Task::none()
+            }
+            Message::Release => {
+                *self.inhibitor.lock().unwrap() = None;
+                self.active_minutes = 0;
+                self.timer_generation.fetch_add(1, Ordering::SeqCst);
+                Task::none()
+            }
+            Message::TimerExpired(gen) => {
+                if self.timer_generation.load(Ordering::SeqCst) == gen {
+                    *self.inhibitor.lock().unwrap() = None;
+                    self.active_minutes = 0;
+                }
+                Task::none()
+            }
+            Message::OpenSettings => {
+                if let Ok(exe) = std::env::current_exe() {
+                    let settings_bin = exe
+                        .parent()
+                        .map(|p| p.join("cosmic-caffeine-settings"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("cosmic-caffeine-settings"));
+                    let _ = Command::new(settings_bin).spawn();
+                }
+                self.close_popup_task()
+            }
+            Message::Noop => Task::none(),
         }
     }
 
-    fn activate(&mut self, _x: i32, _y: i32) {
-        // Default click — toggle with the configured default minutes.
-        let minutes = self
-            .state
-            .lock()
-            .map(|s| s.cfg.default_minutes)
-            .unwrap_or(0);
-        spawn_toggle(self.state.clone(), minutes);
+    fn view(&self) -> Element<'_, Message> {
+        let icon = if self.is_active() { ICON_ON } else { ICON_OFF };
+        self.core
+            .applet
+            .icon_button(icon)
+            .on_press(Message::TogglePopup)
+            .into()
     }
 
-    fn menu(&self) -> Vec<MenuItem<Self>> {
-        let active = self
-            .state
-            .lock()
-            .map(|s| s.inhibitor.is_some())
-            .unwrap_or(false);
-
-        let toggle_label = if active { "Turn off" } else { "Turn on" };
-        let mut items: Vec<MenuItem<Self>> = vec![
-            StandardItem {
-                label: toggle_label.into(),
-                icon_name: if active {
-                    "media-playback-stop-symbolic".into()
-                } else {
-                    "media-playback-start-symbolic".into()
-                },
-                activate: Box::new(|t: &mut CaffeineTray| {
-                    let minutes = t
-                        .state
-                        .lock()
-                        .map(|s| s.cfg.default_minutes)
-                        .unwrap_or(0);
-                    spawn_toggle(t.state.clone(), minutes);
-                }),
-                ..Default::default()
+    fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
+        let active = self.is_active();
+        let header = widget::text::heading(if active {
+            if self.active_minutes == 0 {
+                fl!("popup-on-indefinite")
+            } else {
+                fl!("popup-on", minutes = self.active_minutes)
             }
-            .into(),
-            MenuItem::Separator,
-        ];
+        } else {
+            fl!("popup-off")
+        });
+
+        let toggle: Element<Message> = if active {
+            widget::button::destructive(fl!("turn-off"))
+                .on_press(Message::Release)
+                .width(Length::Fill)
+                .into()
+        } else {
+            widget::button::suggested(fl!("turn-on"))
+                .on_press(Message::Acquire(config::load().default_minutes))
+                .width(Length::Fill)
+                .into()
+        };
+
+        let mut sections: Vec<Element<Message>> =
+            vec![header.into(), toggle];
 
         if !active {
-            for &mins in &[5u32, 30, 60] {
-                items.push(
-                    StandardItem {
-                        label: format!("On for {mins} min"),
-                        activate: Box::new(move |t: &mut CaffeineTray| {
-                            spawn_toggle(t.state.clone(), mins);
-                        }),
-                        ..Default::default()
-                    }
+            // Show duration shortcuts only when off.
+            let buttons: Vec<Element<Message>> = vec![
+                widget::button::standard(fl!("on-for", minutes = 5u32))
+                    .on_press(Message::Acquire(5))
                     .into(),
-                );
-            }
-            items.push(
-                StandardItem {
-                    label: "On indefinitely".into(),
-                    activate: Box::new(|t: &mut CaffeineTray| {
-                        spawn_toggle(t.state.clone(), 0);
-                    }),
-                    ..Default::default()
-                }
+                widget::button::standard(fl!("on-for", minutes = 30u32))
+                    .on_press(Message::Acquire(30))
+                    .into(),
+                widget::button::standard(fl!("on-for", minutes = 60u32))
+                    .on_press(Message::Acquire(60))
+                    .into(),
+                widget::button::standard(fl!("on-indefinitely"))
+                    .on_press(Message::Acquire(0))
+                    .into(),
+            ];
+            sections.push(widget::column::with_children(buttons).spacing(4).into());
+        }
+
+        let footer = widget::row::with_children(vec![
+            widget::button::standard(fl!("settings"))
+                .on_press(Message::OpenSettings)
                 .into(),
-            );
-            items.push(MenuItem::Separator);
-        }
+            widget::space::horizontal().into(),
+        ])
+        .spacing(8)
+        .align_y(cosmic::iced::Alignment::Center);
 
-        items.push(
-            StandardItem {
-                label: "Settings...".into(),
-                icon_name: "preferences-system-symbolic".into(),
-                activate: Box::new(|_| {
-                    if let Some(exe) = settings_exec() {
-                        let _ = Command::new(exe).spawn();
-                    } else {
-                        let _ = Command::new("xdg-open").arg(config_path()).spawn();
-                    }
-                }),
-                ..Default::default()
-            }
-            .into(),
-        );
-        items.push(MenuItem::Separator);
-        items.push(
-            StandardItem {
-                label: "Quit".into(),
-                icon_name: "application-exit-symbolic".into(),
-                activate: Box::new(|_| std::process::exit(0)),
-                ..Default::default()
-            }
-            .into(),
-        );
-        items
-    }
-}
+        sections.push(widget::space::vertical().height(Length::Fixed(4.0)).into());
+        sections.push(footer.into());
 
-/// Toggle. If currently active, releases the lock; otherwise acquires it
-/// and (if `minutes > 0`) schedules an auto-off timer.
-fn spawn_toggle(state: Arc<Mutex<TrayState>>, minutes: u32) {
-    tokio::spawn(async move {
-        let was_active = state
-            .lock()
-            .map(|s| s.inhibitor.is_some())
-            .unwrap_or(false);
-
-        if was_active {
-            release(&state);
-        } else if let Err(e) = acquire(&state, minutes).await {
-            eprintln!("cosmic-caffeine: acquire failed: {e}");
-            notify_error(&e);
-        }
-    });
-}
-
-async fn acquire(state: &Arc<Mutex<TrayState>>, minutes: u32) -> Result<(), String> {
-    let (idle, sleep_inh, notify, why) = {
-        let s = state.lock().map_err(|_| "state lock poisoned")?;
-        (
-            s.cfg.inhibit_idle,
-            s.cfg.inhibit_sleep,
-            s.cfg.notify_on_toggle,
-            if minutes == 0 {
-                "User enabled cosmic-caffeine indefinitely".to_string()
-            } else {
-                format!("User enabled cosmic-caffeine for {minutes} minutes")
-            },
-        )
-    };
-
-    let inhibitor = Inhibitor::acquire(idle, sleep_inh, &why).await?;
-    let what = inhibitor.what.clone();
-
-    let (tx, rx) = oneshot::channel::<()>();
-    {
-        let mut s = state.lock().map_err(|_| "state lock poisoned")?;
-        s.inhibitor = Some(inhibitor);
-        s.active_minutes = minutes;
-        s.timer_abort = Some(tx);
+        let content = widget::column::with_children(sections).spacing(8).padding(8);
+        self.core.applet.popup_container(content).into()
     }
 
-    if notify {
-        let body = if minutes == 0 {
-            format!("Inhibiting {what} indefinitely")
-        } else {
-            format!("Inhibiting {what} for {minutes} min")
-        };
-        let _ = Notification::new()
-            .summary("Caffeine on")
-            .body(&body)
-            .icon("cosmic-caffeine-active-symbolic")
-            .appname("cosmic-caffeine")
-            .show();
+    fn on_close_requested(&self, id: window::Id) -> Option<Message> {
+        Some(Message::PopupClosed(id))
     }
 
-    if minutes > 0 {
-        let state = state.clone();
-        tokio::spawn(async move {
-            let timeout = Duration::from_secs(u64::from(minutes) * 60);
-            tokio::select! {
-                _ = sleep(timeout) => {
-                    release(&state);
-                    let notify = state.lock().map(|s| s.cfg.notify_on_toggle).unwrap_or(false);
-                    if notify {
-                        let _ = Notification::new()
-                            .summary("Caffeine off")
-                            .body("Timer expired; idle/sleep restored.")
-                            .icon("cosmic-caffeine-symbolic")
-                            .appname("cosmic-caffeine")
-                            .show();
-                    }
-                }
-                _ = rx => {
-                    // User toggled off manually before the timer.
+    fn subscription(&self) -> Subscription<Message> {
+        event::listen_with(|evt, _status, _id| match evt {
+            Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => {
+                if matches!(key, keyboard::Key::Named(keyboard::key::Named::Escape)) {
+                    Some(Message::Noop)
+                } else {
+                    None
                 }
             }
-        });
+            _ => None,
+        })
     }
-
-    Ok(())
-}
-
-fn release(state: &Arc<Mutex<TrayState>>) {
-    let (notify, was_active) = {
-        let mut s = match state.lock() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let was_active = s.inhibitor.is_some();
-        s.inhibitor = None;
-        s.active_minutes = 0;
-        if let Some(tx) = s.timer_abort.take() {
-            let _ = tx.send(());
-        }
-        (s.cfg.notify_on_toggle, was_active)
-    };
-    if was_active && notify {
-        let _ = Notification::new()
-            .summary("Caffeine off")
-            .body("Idle/sleep restored.")
-            .icon("cosmic-caffeine-symbolic")
-            .appname("cosmic-caffeine")
-            .show();
-    }
-}
-
-fn notify_error(msg: &str) {
-    let _ = Notification::new()
-        .summary("cosmic-caffeine: error")
-        .body(msg)
-        .appname("cosmic-caffeine")
-        .show();
-}
-
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
-    if let Some(cmd) = args.next() {
-        match cmd.as_str() {
-            "--help" | "-h" => {
-                println!("cosmic-caffeine: Wayland-native idle/sleep inhibitor.");
-                println!();
-                println!("Usage:");
-                println!("  cosmic-caffeine            run the tray daemon");
-                println!("  cosmic-caffeine --help     this help");
-                println!();
-                println!("Run `cosmic-caffeine-settings` for the GUI settings editor.");
-                return Ok(());
-            }
-            other => {
-                eprintln!("cosmic-caffeine: unknown argument {other:?}");
-                std::process::exit(2);
-            }
-        }
-    }
-
-    let cfg_path = config_path();
-    let cfg = config::read(&cfg_path).unwrap_or_default();
-    if !cfg_path.exists() {
-        let _ = config::write(&cfg_path, &cfg);
-    }
-
-    let state = Arc::new(Mutex::new(TrayState {
-        cfg,
-        ..Default::default()
-    }));
-
-    let tray = CaffeineTray {
-        state: state.clone(),
-    };
-    let _handle = tray.spawn().await?;
-
-    std::future::pending::<()>().await;
-    Ok(())
 }
