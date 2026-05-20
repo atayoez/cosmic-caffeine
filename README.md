@@ -37,13 +37,24 @@ These are POC limits, not by-design. PRs welcome.
 
 ## How the inhibit actually works
 
-systemd-logind exposes
-[`org.freedesktop.login1.Manager.Inhibit`](https://www.freedesktop.org/wiki/Software/systemd/inhibit/)
-on the system bus. Calling it returns a file descriptor that holds the
-lock — close the FD and logind cancels it. We hold the FD on the tray
-state for as long as the user wants caffeine on. This is the same
-mechanism `systemd-inhibit(1)` uses, just driven from inside the
-daemon over `zbus`.
+We take **two** locks in tandem, because no single API covers both
+"don't suspend" and "don't blank the screen" on a typical Wayland
+session:
+
+- `org.freedesktop.login1.Manager.Inhibit` on the **system bus**
+  returns a file descriptor; holding the FD blocks automatic suspend.
+  This is the same mechanism `systemd-inhibit(1)` uses.
+- `org.freedesktop.ScreenSaver.Inhibit` on the **session bus**
+  (Wayland compositors, X screensavers, and most desktops honor it)
+  returns a cookie tied to the bus connection; holding the connection
+  blocks screen blanking / lock-on-idle. cosmic-comp, mutter, kwin,
+  and sway all manage blanking themselves and don't act on logind's
+  `idle` inhibit class — so the ScreenSaver call is what actually
+  keeps the screen on.
+
+Both locks are dropped when the user toggles caffeine off (or the
+duration timer fires). Missing ScreenSaver service is a non-fatal
+no-op; the suspend lock still works.
 
 ## Install
 

@@ -20,3 +20,8 @@ settings-save = Save
 settings-saving = Saving…
 settings-saved = Saved.
 settings-error = Error: { $error }
+
+# Toggle notifications
+notify-on-indefinite = Caffeine on (indefinite)
+notify-on-minutes = Caffeine on for { $minutes } min
+notify-off = Caffeine off

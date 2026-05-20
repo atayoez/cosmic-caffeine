@@ -20,3 +20,8 @@ settings-save = Speichern
 settings-saving = Speichere…
 settings-saved = Gespeichert.
 settings-error = Fehler: { $error }
+
+# Umschalt-Benachrichtigungen
+notify-on-indefinite = Koffein an (unbegrenzt)
+notify-on-minutes = Koffein für { $minutes } Min. an
+notify-off = Koffein aus

@@ -149,6 +149,14 @@ impl cosmic::Application for App {
             }
             Message::AcquireResult(Ok(minutes)) => {
                 self.active_minutes = minutes;
+                if config::load().notify_on_toggle {
+                    let summary = if minutes == 0 {
+                        fl!("notify-on-indefinite")
+                    } else {
+                        fl!("notify-on-minutes", minutes = minutes)
+                    };
+                    spawn_toggle_notification(summary);
+                }
                 let gen = self.timer_generation.fetch_add(1, Ordering::SeqCst) + 1;
                 if minutes > 0 {
                     let timer_gen = self.timer_generation.clone();
@@ -176,15 +184,23 @@ impl cosmic::Application for App {
                 Task::none()
             }
             Message::Release => {
+                let was_active = self.inhibitor.lock().unwrap().is_some();
                 *self.inhibitor.lock().unwrap() = None;
                 self.active_minutes = 0;
                 self.timer_generation.fetch_add(1, Ordering::SeqCst);
+                if was_active && config::load().notify_on_toggle {
+                    spawn_toggle_notification(fl!("notify-off"));
+                }
                 Task::none()
             }
             Message::TimerExpired(gen) => {
                 if self.timer_generation.load(Ordering::SeqCst) == gen {
+                    let was_active = self.inhibitor.lock().unwrap().is_some();
                     *self.inhibitor.lock().unwrap() = None;
                     self.active_minutes = 0;
+                    if was_active && config::load().notify_on_toggle {
+                        spawn_toggle_notification(fl!("notify-off"));
+                    }
                 }
                 Task::none()
             }
@@ -289,4 +305,16 @@ impl cosmic::Application for App {
             _ => None,
         })
     }
+}
+
+/// Fire a "Caffeine on/off" desktop notification. Spawned on a blocking
+/// thread because `notify_rust::Notification::show` makes a synchronous
+/// D-Bus call.
+fn spawn_toggle_notification(summary: String) {
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new()
+            .summary(&summary)
+            .icon(ICON_ON)
+            .show();
+    });
 }

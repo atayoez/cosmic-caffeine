@@ -20,3 +20,8 @@ settings-save = Kaydet
 settings-saving = Kaydediliyor…
 settings-saved = Kaydedildi.
 settings-error = Hata: { $error }
+
+# Açma/kapama bildirimleri
+notify-on-indefinite = Kafein açık (süresiz)
+notify-on-minutes = Kafein { $minutes } dk açık
+notify-off = Kafein kapalı
