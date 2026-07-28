@@ -28,8 +28,7 @@ i18n-embed-fl = "0.10"
 rust-embed = "8"
 
 [dependencies.libcosmic]
-git = "https://github.com/pop-os/libcosmic.git"
-rev = "0e0960f3c79138b445ae84f7ac6f91d4db36e8b4"
+git = "https://github.com/pop-os/libcosmic"
 default-features = false
 features = [
     "advanced-shaping",
@@ -40,14 +39,10 @@ features = [
 ]
 
 [dependencies.cosmic-config]
-git = "https://github.com/pop-os/libcosmic.git"
-rev = "0e0960f3c79138b445ae84f7ac6f91d4db36e8b4"
+git = "https://github.com/pop-os/libcosmic"
 
 [profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
-
-[patch.crates-io]
-proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }

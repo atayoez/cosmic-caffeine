@@ -57,16 +57,16 @@ refresh_caches() {
 }
 
 # Stop any running cosmic-caffeine (old SNI daemon and/or applet).
-# pkill -x matches by the 15-char comm name "cosmic-caffein" for every
-# invocation regardless of args, so this catches both old and new modes.
+# pkill -x matches by exact comm name for every invocation regardless
+# of args, so this catches both old and new modes.
 stop_running() {
-    if pgrep -x cosmic-caffein >/dev/null 2>&1; then
-        pkill -x cosmic-caffein 2>/dev/null || true
+    if pgrep -x cosmic-caffeine >/dev/null 2>&1; then
+        pkill -x cosmic-caffeine 2>/dev/null || true
         for _ in 1 2 3 4 5; do
-            pgrep -x cosmic-caffein >/dev/null 2>&1 || return 0
+            pgrep -x cosmic-caffeine >/dev/null 2>&1 || return 0
             sleep 0.2
         done
-        pkill -9 -x cosmic-caffein 2>/dev/null || true
+        pkill -9 -x cosmic-caffeine 2>/dev/null || true
         sleep 0.2
     fi
 }
